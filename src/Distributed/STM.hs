@@ -32,9 +32,3 @@ initSTM conn = void $ execute conn
         ( label     VARCHAR(256) NOT NULL PRIMARY KEY
         , value     JSONB NOT NULL
         ) |] ()
-
-test :: IO ()
-test = do
-  conn <- connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10"
-  initSTM conn
-  return ()

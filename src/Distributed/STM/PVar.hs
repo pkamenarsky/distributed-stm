@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
 module Distributed.STM.PVar where
@@ -19,7 +20,7 @@ newPVar label val = do
   unsafeAtomIO $ execute c
      [sql| INSERT INTO variable (label, value)
            VALUES (?, ?) |]
-     (label, encode val)
+     (label, toJSON val)
   return $ PVar label
 
 readPVar :: FromJSON a => PVar a -> Atom a
@@ -30,9 +31,9 @@ readPVar (PVar label) = do
            WHERE label = ? |]
      (Only label)
   case x of
-    (Only x:_) -> case decode x of
-      Just x -> return x
-      Nothing -> error "PVar can't be parsed"
+    (Only x:_) -> case fromJSON x of
+      Success x -> return x
+      Error e -> error $ "PVar can't be parsed: " ++ e
     _ -> error "PVar doesn't exist"
 
 writePVar :: ToJSON a => PVar a -> a -> Atom ()
@@ -43,4 +44,15 @@ writePVar (PVar label) val = do
     execute c
        [sql| INSERT INTO variable (label, value)
              VALUES (?, ?) |]
-       (label, encode val)
+       (label, toJSON val)
+
+testSTM :: IO ()
+testSTM = do
+  conn <- connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10"
+  initSTM conn
+
+  r <- atomically conn $ do
+    v <- newPVar "var" (5 :: Int)
+    readPVar v
+
+  putStrLn $ show r
