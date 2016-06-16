@@ -17,19 +17,21 @@ data PVar a = PVar String
 newPVar :: ToJSON a => String -> a -> Atom (PVar a)
 newPVar label val = do
   c <- connection
-  unsafeAtomIO $ execute c
-     [sql| INSERT INTO variable (label, value)
-           VALUES (?, ?) |]
-     (label, toJSON val)
+  unsafeAtomIO $ do
+    execute c [sql| DELETE FROM variable WHERE label = ? |] (Only label)
+    execute c
+      [sql| INSERT INTO variable (label, value)
+            VALUES (?, ?) |]
+      (label, toJSON val)
   return $ PVar label
 
 readPVar :: FromJSON a => PVar a -> Atom a
 readPVar (PVar label) = do
   c <- connection
   x <- unsafeAtomIO $ query c
-     [sql| SELECT value FROM variable
-           WHERE label = ? |]
-     (Only label)
+         [sql| SELECT value FROM variable
+               WHERE label = ? |]
+         (Only label)
   case x of
     (Only x:_) -> case fromJSON x of
       Success x -> return x
@@ -42,9 +44,9 @@ writePVar (PVar label) val = do
   void $ unsafeAtomIO $ do
     execute c [sql| DELETE FROM variable WHERE label = ? |] (Only label)
     execute c
-       [sql| INSERT INTO variable (label, value)
-             VALUES (?, ?) |]
-       (label, toJSON val)
+      [sql| INSERT INTO variable (label, value)
+            VALUES (?, ?) |]
+      (label, toJSON val)
 
 testSTM :: IO ()
 testSTM = do
