@@ -9,6 +9,7 @@ import           Control.Concurrent                 (forkIO)
 
 import           Data.Aeson
 import           Data.Int
+import           Data.Pool
 
 import           Database.PostgreSQL.Simple
 import           Database.PostgreSQL.Simple.SqlQQ
@@ -60,18 +61,18 @@ writePVar (PVar label) val = do
 
 testSTM :: IO ()
 testSTM = do
-  conn <- connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10"
-  initSTM conn
+  pool <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10") close 1 (fromInteger 1) 50
+  withResource pool $ \conn -> initSTM conn
 
-  v <- atomically conn $ newPVar "var" (5 :: Int)
+  v <- withResource pool $ \conn -> atomically conn $ newPVar "var" (5 :: Int)
 
-  r <- atomically conn $ do
+  r <- withResource pool $ \conn -> atomically conn $ do
     r <- readPVar v
     writePVar v (r + 1)
     return (r + 1)
 
   replicateM_ 5 $ forkIO $ do
-    r <- atomically conn $ do
+    r <- withResource pool $ \conn -> atomically conn $ do
       r <- readPVar v
       writePVar v (r + 1)
       return (r + 1)
