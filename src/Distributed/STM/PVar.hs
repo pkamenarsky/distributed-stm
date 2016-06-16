@@ -3,7 +3,7 @@
 
 module Distributed.STM.PVar where
 
-import           Control.Monad                      (void)
+import           Control.Monad                      (void, replicateM_)
 import           Control.Exception
 import           Control.Concurrent                 (forkIO)
 
@@ -64,7 +64,7 @@ testSTM = do
     writePVar v (r + 1)
     return (r + 1)
 
-  forkIO $ do
+  replicateM_ 5 $ forkIO $ do
     r <- atomically conn $ do
       r <- readPVar v
       writePVar v (r + 1)
