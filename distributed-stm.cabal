@@ -19,6 +19,7 @@ library
                      , Distributed.STM.PVar
   build-depends:       base >= 4.7 && < 5
                      , postgresql-simple
+                     , mtl
   default-language:    Haskell2010
 
 executable distributed-stm-exe
