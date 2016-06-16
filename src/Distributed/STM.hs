@@ -29,6 +29,6 @@ atomically conn atom = withTransactionSerializable conn $ runAtom conn atom
 initSTM :: Connection -> IO ()
 initSTM conn = void $ execute conn
   [sql| CREATE TABLE IF NOT EXISTS variable
-        ( label     VARCHAR(256) NOT NULL PRIMARY KEY
+        ( label     VARCHAR(256) NOT NULL PRIMARY KEY DEFERRABLE
         , value     JSONB NOT NULL
         ) |] ()
