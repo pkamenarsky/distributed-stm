@@ -61,7 +61,7 @@ writePVar (PVar label) val = do
 
 testSTM :: IO ()
 testSTM = do
-  pool <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10") close 1 (fromInteger 1) 50
+  pool <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10") close 1 1 50
   withResource pool $ \conn -> initSTM conn
 
   v <- withResource pool $ \conn -> atomically conn $ newPVar "var" (5 :: Int)
