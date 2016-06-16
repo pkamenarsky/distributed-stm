@@ -4,8 +4,11 @@
 module Distributed.STM.PVar where
 
 import           Control.Monad                      (void)
+import           Control.Exception
+import           Control.Concurrent                 (forkIO)
 
 import           Data.Aeson
+import           Data.Int
 
 import           Database.PostgreSQL.Simple
 import           Database.PostgreSQL.Simple.SqlQQ
@@ -18,12 +21,13 @@ newPVar :: ToJSON a => String -> a -> Atom (PVar a)
 newPVar label val = do
   c <- connection
   unsafeAtomIO $ do
-    execute c [sql| DELETE FROM variable WHERE label = ? |] (Only label)
     execute c
       [sql| INSERT INTO variable (label, value)
             VALUES (?, ?) |]
-      (label, toJSON val)
+      (label, toJSON val) `catch` exists
   return $ PVar label
+  where exists :: SqlError -> IO Int64
+        exists _ = return 0
 
 readPVar :: FromJSON a => PVar a -> Atom a
 readPVar (PVar label) = do
@@ -53,8 +57,18 @@ testSTM = do
   conn <- connectPostgreSQL  "host=localhost port=5432 dbname=postgres connect_timeout=10"
   initSTM conn
 
+  v <- atomically conn $ newPVar "var" (5 :: Int)
+
   r <- atomically conn $ do
-    v <- newPVar "var" (5 :: Int)
-    readPVar v
+    r <- readPVar v
+    writePVar v (r + 1)
+    return (r + 1)
+
+  forkIO $ do
+    r <- atomically conn $ do
+      r <- readPVar v
+      writePVar v (r + 1)
+      return (r + 1)
+    putStrLn $ "forked: " ++ show r
 
   putStrLn $ show r
