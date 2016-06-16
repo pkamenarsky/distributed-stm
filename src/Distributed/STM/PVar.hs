@@ -35,7 +35,6 @@ readPVar (PVar label) = do
       Nothing -> error "PVar can't be parsed"
     _ -> error "PVar doesn't exist"
 
-
 writePVar :: ToJSON a => PVar a -> a -> Atom ()
 writePVar (PVar label) val = do
   c <- connection
