@@ -46,11 +46,17 @@ writePVar :: ToJSON a => PVar a -> a -> Atom ()
 writePVar (PVar label) val = do
   c <- connection
   void $ unsafeAtomIO $ do
+    {-
     execute c [sql| DELETE FROM variable WHERE label = ? |] (Only label)
     execute c
       [sql| INSERT INTO variable (label, value)
             VALUES (?, ?) |]
       (label, toJSON val)
+    -}
+    execute c
+      [sql| UPDATE variable SET value = ?
+            WHERE label = ? |]
+      (toJSON val, label)
 
 testSTM :: IO ()
 testSTM = do
