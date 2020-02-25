@@ -20,8 +20,11 @@ library
   build-depends:       base >= 4.7 && < 5
                      , postgresql-simple
                      , mtl
-                     , aeson >= 0.11
+                     , aeson
+                     , bytestring
+                     , containers
                      , resource-pool
+                     , text
   default-language:    Haskell2010
 
 executable distributed-stm-exe

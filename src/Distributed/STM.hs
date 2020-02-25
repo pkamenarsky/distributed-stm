@@ -31,5 +31,5 @@ initSTM conn = void $ execute conn
   [sql| CREATE TABLE IF NOT EXISTS variable
         -- ( label     VARCHAR(256) NOT NULL PRIMARY KEY INITIALLY DEFERRED
         ( label     VARCHAR(256) NOT NULL PRIMARY KEY
-        , value     JSONB NOT NULL
+        , value     JSONB
         ) |] ()
