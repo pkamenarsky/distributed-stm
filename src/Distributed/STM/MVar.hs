@@ -1,13 +1,27 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
-module Distributed.STM.PVar
+-- | 
+-- An @'MVar' t@ is a distributed mutable location,
+-- backed by a Postgres database, that is either empty or contains a
+-- value of type @t@.  It has two fundamental operations: 'putMVar'
+-- which fills an 'MVar' if it is empty and blocks otherwise, and
+-- 'takeMVar' which empties an 'MVar' if it is full and blocks
+-- otherwise.  They can be used in multiple different ways:
+--
+--   1. As distributed synchronized mutable variables,
+--
+--   2. As distributed channels, with 'takeMVar' and 'putMVar' as receive and send, and
+--
+--   3. As a distributed binary semaphore @'MVar' ()@, with 'takeMVar' and 'putMVar' as
+--      wait and signal.
+module Distributed.STM.MVar
   ( MVar
 
   , newEmptyMVar
 
   , putMVar
-  , readMVar
+  , takeMVar
   ) where
 
 import           Control.Monad                      (void, replicateM_)
@@ -35,14 +49,8 @@ import           Distributed.STM
 
 data MVar a = MVar T.Text
 
-newtype STM a = STM { unSTM :: ReaderT Connection IO a }
-
-runSTM :: Pool Connection -> STM a -> IO a
-runSTM pool (STM stm) = withResource pool (runReaderT stm)
-
-newEmptyMVar :: T.Text -> STM (MVar a)
-newEmptyMVar label = STM $ do
-  conn <- ask
+newEmptyMVar :: Pool Connection -> T.Text -> IO (MVar a)
+newEmptyMVar pool label = withResource pool $ \conn -> do
   liftIO $ do
     execute conn
       [sql| INSERT INTO variable (label, value)
@@ -54,12 +62,13 @@ newEmptyMVar label = STM $ do
     exists :: SqlError -> IO Int64
     exists _ = return 0
 
+--------------------------------------------------------------------------------
+
 data MVarException = Retry deriving Show
 instance Exception MVarException
 
-readMVar :: FromJSON a => MVar a -> STM a
-readMVar mvar@(MVar label) = STM $ do
-  conn <- ask
+takeMVar :: FromJSON a => Pool Connection -> MVar a -> IO a
+takeMVar pool mvar@(MVar label) = withResource pool $ \conn -> do
   r <- liftIO $ flip catch stmerror $ withTransactionSerializable conn $ do
     r <- query conn
            [sql| UPDATE variable SET value = ?
@@ -78,7 +87,7 @@ readMVar mvar@(MVar label) = STM $ do
   case r of
     Left () -> do
       liftIO $ wait conn
-      unSTM (readMVar mvar)
+      takeMVar pool mvar
     Right a -> pure a
   where
     stmerror Retry = pure (Left ())
@@ -90,9 +99,8 @@ readMVar mvar@(MVar label) = STM $ do
       unless (notificationChannel n == "write_var" && notificationData n == T.encodeUtf8 label)
         (wait conn)
 
-putMVar :: ToJSON a => MVar a -> a -> STM ()
-putMVar mvar@(MVar label) a = STM $ do
-  conn <- ask
+putMVar :: ToJSON a => Pool Connection -> MVar a -> a -> IO ()
+putMVar pool mvar@(MVar label) a = withResource pool $ \conn -> do
   r <- liftIO $ flip catch stmerror $ withTransactionSerializable conn $ do
     r <- query conn
            [sql| UPDATE variable SET value = ?
@@ -109,7 +117,7 @@ putMVar mvar@(MVar label) a = STM $ do
   case r of
     Left () -> do
       liftIO $ wait conn
-      unSTM (putMVar mvar a)
+      putMVar pool mvar a
     Right () -> pure ()
   where
     stmerror Retry = pure (Left ())
@@ -121,9 +129,8 @@ putMVar mvar@(MVar label) a = STM $ do
       unless (notificationChannel n == "read_var" && notificationData n == T.encodeUtf8 label)
         (wait conn)
 
-withMVar :: FromJSON a => ToJSON a => MVar a -> (a -> IO (a, b)) -> STM b
-withMVar mvar@(MVar label) f = STM $ do
-  conn <- ask
+withMVar :: FromJSON a => ToJSON a => Pool Connection -> MVar a -> (a -> IO (a, b)) -> IO b
+withMVar pool mvar@(MVar label) f = withResource pool $ \conn -> do
   r <- liftIO $ flip catch stmerror $ withTransactionSerializable conn $ do
     r <- query conn
            [sql| UPDATE variable SET value = ?
@@ -151,7 +158,7 @@ withMVar mvar@(MVar label) f = STM $ do
   case r of
     Left () -> do
       liftIO $ wait conn
-      unSTM (withMVar mvar f)
+      withMVar pool mvar f
     Right b -> pure b
   where
     stmerror Retry = pure (Left ())
@@ -163,86 +170,10 @@ withMVar mvar@(MVar label) f = STM $ do
       unless (notificationChannel n == "write_var" && notificationData n == T.encodeUtf8 label)
         (wait conn)
 
-getVar :: IO (Pool Connection, MVar Int)
-getVar = do
-  p <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=transportapiv3dev_phil user=transportapi password=randompasswordsFTWbutthiswillhavetodo") close 1 1 50
-  v <- runSTM p (newEmptyMVar "lock")
-  pure (p, v)
-
-getVar2 :: IO (Pool Connection, MVar Int)
-getVar2 = do
-  p <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=transportapiv3dev_phil user=transportapi password=randompasswordsFTWbutthiswillhavetodo") close 1 1 50
-  v <- runSTM p (newEmptyMVar "lock2")
-  pure (p, v)
-
 --------------------------------------------------------------------------------
 
-data PVar a = PVar String
-
-newPVar :: ToJSON a => String -> a -> Atom (PVar a)
-newPVar label val = do
-  c <- connection
-  unsafeAtomIO $ do
-    execute c
-      [sql| INSERT INTO variable (label, value)
-            VALUES (?, ?)
-      |]
-      (label, toJSON val) `catch` exists
-  return $ PVar label
-  where
-    exists :: SqlError -> IO Int64
-    exists _ = return 0
-
-readPVar :: FromJSON a => PVar a -> Atom a
-readPVar (PVar label) = do
-  c <- connection
-  x <- unsafeAtomIO $ query c
-         [sql| SELECT value FROM variable
-               WHERE label = ?
-         |]
-         (Only label)
-  case x of
-    (Only x:_) -> case fromJSON x of
-      Success x -> return x
-      Error e -> error $ "PVar can't be parsed: " ++ e
-    _ -> error "PVar doesn't exist"
-
-writePVar :: ToJSON a => PVar a -> a -> Atom ()
-writePVar (PVar label) val = do
-  c <- connection
-  void $ unsafeAtomIO $ do
-    execute c
-      [sql| UPDATE variable SET value = ?
-            WHERE label = ?
-      |]
-      (toJSON val, label)
-
-testSTM :: IO ()
-testSTM = do
-  pool <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=transportapiv3dev_phil user=transportapi password=randompasswordsFTWbutthiswillhavetodo") close 1 1 50
-  withResource pool $ \conn -> execute_ conn [sql| DROP TABLE variable |]
-        
-  withResource pool $ \conn -> initSTM conn
-
-  v <- withResource pool $ \conn -> atomically conn $ newPVar "var" (5 :: Int)
-
-  r <- withResource pool $ \conn -> atomically conn $ do
-    r <- readPVar v
-    writePVar v (r + 1)
-    return (r + 1)
-
-  replicateM_ 5 $ forkIO $ do
-    r <- withResource pool $ \conn -> atomically conn $ do
-      r <- readPVar v
-      writePVar v (r + 1)
-      return (r + 1)
-    putStrLn $ "forked: " ++ show r
-
-  replicateM_ 5 $ forkIO $ do
-    r <- withResource pool $ \conn -> atomically conn $ do
-      r <- readPVar v
-      writePVar v (r + 1)
-      return (r + 1)
-    putStrLn $ "forked: " ++ show r
-
-  putStrLn $ show r
+testVar :: IO (Pool Connection, MVar Int)
+testVar = do
+  p <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=transportapiv3dev_phil user=transportapi password=randompasswordsFTWbutthiswillhavetodo") close 1 1 50
+  v <- newEmptyMVar p "lock"
+  pure (p, v)

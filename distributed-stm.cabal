@@ -16,7 +16,7 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Distributed.STM
-                     , Distributed.STM.PVar
+                     , Distributed.STM.MVar
   build-depends:       base >= 4.7 && < 5
                      , postgresql-simple
                      , mtl
