@@ -1,11 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
 
-module Distributed.STM.PVar where
+module Distributed.STM.PVar
+  ( MVar
+
+  , newEmptyMVar
+
+  , putMVar
+  , readMVar
+  ) where
 
 import           Control.Monad                      (void, replicateM_)
 import           Control.Exception
 import           Control.Concurrent                 (forkIO, killThread, threadDelay)
+import           Control.Concurrent.Chan
 import qualified Control.Concurrent as C
 import           Control.Monad.Reader
 
@@ -27,36 +35,14 @@ import           Distributed.STM
 
 data MVar a = MVar T.Text
 
-newtype STM a = STM (ReaderT (Connection, IORef (M.Map B.ByteString [C.MVar B.ByteString])) IO a)
+newtype STM a = STM { unSTM :: ReaderT Connection IO a }
 
-runSTM :: Connection -> STM a -> IO a
-runSTM conn (STM stm) = do
-  mvar <- newIORef M.empty
-
-  -- TODO: exceptions
-  tid <- forkIO $ do
-    n  <- getNotification conn
-
-    io <- atomicModifyIORef' mvar $ \m -> case M.lookup (notificationChannel n) m of
-      -- fire the next listener
-      Just (mvar:mvars) ->
-        ( M.insert (notificationChannel n) mvars m
-        , C.putMVar mvar (notificationData n)
-        )
-      -- no more listeners, UNLISTEN
-      Just []       ->
-        ( M.delete (notificationChannel n) m
-        , void $ execute conn [sql| UNLISTEN ? |] (Only (notificationChannel n))
-        )
-    io
-
-  a <- runReaderT stm (conn, mvar)
-  killThread tid
-  pure a
+runSTM :: Pool Connection -> STM a -> IO a
+runSTM pool (STM stm) = withResource pool (runReaderT stm)
 
 newEmptyMVar :: T.Text -> STM (MVar a)
 newEmptyMVar label = STM $ do
-  (conn, _) <- ask
+  conn <- ask
   liftIO $ do
     execute conn
       [sql| INSERT INTO variable (label, value)
@@ -68,47 +54,128 @@ newEmptyMVar label = STM $ do
     exists :: SqlError -> IO Int64
     exists _ = return 0
 
+data MVarException = Retry deriving Show
+instance Exception MVarException
+
 readMVar :: FromJSON a => MVar a -> STM a
-readMVar (MVar label) = STM $ ask >>= loop
+readMVar mvar@(MVar label) = STM $ do
+  conn <- ask
+  r <- liftIO $ flip catch stmerror $ withTransactionSerializable conn $ do
+    r <- query conn
+           [sql| UPDATE variable SET value = ?
+                 WHERE label = ?
+                 RETURNING (SELECT value FROM variable WHERE label = ?)
+           |]
+       (Null, label, label)
+
+    execute conn [sql| NOTIFY read_var, ? |] (Only label)
+
+    case r of
+      (Only Null:_) -> throw Retry
+      (Only json:_) -> case fromJSON json of
+        Success a -> pure (Right a) 
+        Error e   -> error e
+  case r of
+    Left () -> do
+      liftIO $ wait conn
+      unSTM (readMVar mvar)
+    Right a -> pure a
   where
-    register mvar (Just mvars) = Just (mvar:mvars)
-    register mvar Nothing = Just [mvar]
+    stmerror Retry = pure (Left ())
 
-    loop (conn, mvar) = do
-      a <- liftIO $ read conn
-      case a of
-        Left _  -> do
-          liftIO $ do
-            listener <- C.newEmptyMVar
-            modifyIORef mvar $ \m -> M.alter (register listener) (T.encodeUtf8 label) m
-            execute conn [sql| LISTEN ? |] (Only label)
-            C.takeMVar listener
-          loop (conn, mvar)
-        Right a -> pure a
+    wait conn = do
+      execute_ conn "LISTEN write_var"
+      n <- getNotification conn
+      execute_ conn "UNLISTEN write_var"
+      unless (notificationChannel n == "write_var" && notificationData n == T.encodeUtf8 label)
+        (wait conn)
 
-    -- TODO: exceptions
-    read conn = do
-        flip beginMode conn $ TransactionMode
-          { isolationLevel = Serializable
-          , readWriteMode  = ReadWrite
-          }
-        r <- query conn
-               [sql| UPDATE variable SET value = ?
-                     WHERE label = ?
-                     RETURNING (SELECT value FROM variable WHERE label = ?)
-               |]
-             (Null, label, label)
-        case r of
-          (Only Null:_) -> do
-            rollback conn
-            pure $ Left ()
-          (Only json:_) -> case fromJSON json of
-            Success a -> do
-              commit conn
-              pure $ Right a
-            Error e   -> do
-              rollback conn
-              error e
+putMVar :: ToJSON a => MVar a -> a -> STM ()
+putMVar mvar@(MVar label) a = STM $ do
+  conn <- ask
+  r <- liftIO $ flip catch stmerror $ withTransactionSerializable conn $ do
+    r <- query conn
+           [sql| UPDATE variable SET value = ?
+                 WHERE label = ?
+                 RETURNING (SELECT value FROM variable WHERE label = ?)
+           |]
+       (toJSON a, label, label)
+
+    execute conn [sql| NOTIFY write_var, ? |] (Only label)
+
+    case r of
+      (Only Null:_) -> pure (Right ())
+      (Only json:_) -> throw Retry
+  case r of
+    Left () -> do
+      liftIO $ wait conn
+      unSTM (putMVar mvar a)
+    Right () -> pure ()
+  where
+    stmerror Retry = pure (Left ())
+
+    wait conn = do
+      execute_ conn "LISTEN read_var"
+      n <- getNotification conn
+      execute_ conn "UNLISTEN read_var"
+      unless (notificationChannel n == "read_var" && notificationData n == T.encodeUtf8 label)
+        (wait conn)
+
+withMVar :: FromJSON a => ToJSON a => MVar a -> (a -> IO (a, b)) -> STM b
+withMVar mvar@(MVar label) f = STM $ do
+  conn <- ask
+  r <- liftIO $ flip catch stmerror $ withTransactionSerializable conn $ do
+    r <- query conn
+           [sql| UPDATE variable SET value = ?
+                 WHERE label = ?
+                 RETURNING (SELECT value FROM variable WHERE label = ?)
+           |]
+       (Null, label, label)
+
+    (a, b) <- case r of
+      (Only Null:_) -> throw Retry
+      (Only json:_) -> case fromJSON json of
+        Success a -> f a
+        Error e   -> error e
+
+    execute conn
+      [sql| UPDATE variable SET value = ?
+            WHERE label = ?
+      |]
+      (toJSON a, label)
+
+    execute conn [sql| NOTIFY write_var, ? |] (Only label)
+
+    pure (Right b)
+
+  case r of
+    Left () -> do
+      liftIO $ wait conn
+      unSTM (withMVar mvar f)
+    Right b -> pure b
+  where
+    stmerror Retry = pure (Left ())
+
+    wait conn = do
+      execute_ conn "LISTEN write_var"
+      n <- getNotification conn
+      execute_ conn "UNLISTEN write_var"
+      unless (notificationChannel n == "write_var" && notificationData n == T.encodeUtf8 label)
+        (wait conn)
+
+getVar :: IO (Pool Connection, MVar Int)
+getVar = do
+  p <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=transportapiv3dev_phil user=transportapi password=randompasswordsFTWbutthiswillhavetodo") close 1 1 50
+  v <- runSTM p (newEmptyMVar "lock")
+  pure (p, v)
+
+getVar2 :: IO (Pool Connection, MVar Int)
+getVar2 = do
+  p <- createPool (connectPostgreSQL  "host=localhost port=5432 dbname=transportapiv3dev_phil user=transportapi password=randompasswordsFTWbutthiswillhavetodo") close 1 1 50
+  v <- runSTM p (newEmptyMVar "lock2")
+  pure (p, v)
+
+--------------------------------------------------------------------------------
 
 data PVar a = PVar String
 
